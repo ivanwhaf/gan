@@ -11,17 +11,20 @@ import torch.optim as optim
 from torch import nn
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import transforms
 from torchvision.utils import save_image
+
+from dataset import ImgDataset
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-name', type=str, help='project name', default='dcgan')
-parser.add_argument('-dataset_path', type=str, help='relative path of dataset', default='./dataset')
+parser.add_argument('-dataset_path', type=str, help='relative path of dataset', default='./dataset/frs')
+parser.add_argument('-input_size', type=int, help='input size of image', default=128)
 parser.add_argument('-batch_size', type=int, help='batch size', default=128)
 parser.add_argument('-lr', type=float, help='learning rate', default=0.0002)
-parser.add_argument('-epochs', type=int, help='training epochs', default=300)
+parser.add_argument('-epochs', type=int, help='training epochs', default=800)
 parser.add_argument('-beta', type=float, help='beta', default=0.5)
-parser.add_argument('-noise_size', type=int, help='noise size', default=200)
+parser.add_argument('-noise_size', type=int, help='noise size', default=100)
 parser.add_argument('-nz', type=int, help='nz', default=100)
 parser.add_argument('-log_dir', type=str, help='log dir', default='output')
 args = parser.parse_args()
@@ -29,15 +32,21 @@ args = parser.parse_args()
 
 def load_dataset():
     transform = transforms.Compose([
-        transforms.ToTensor(),  # convert (0,255) to (0,1)
+        transforms.Resize((args.input_size, args.input_size)),
+        transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         # transforms.Normalize((0.5,), (0.5,))  # convert (0,1) to (-1,1)
     ])
 
     # train_set = datasets.MNIST(
     #     args.dataset_path, train=True, download=True, transform=transform)
-    train_set = datasets.CIFAR10(
-        args.dataset_path, train=True, download=True, transform=transform)
+    # train_set = datasets.CIFAR10(
+    #     args.dataset_path, train=True, download=True, transform=transform)
+
+    class_label_dct = {'冬瓜排骨汤': 0, '土豆丝': 1, '椒盐虾': 2, '番茄炒蛋': 3, '糖醋里脊': 4, '红烧肉': 5, '莴笋肉片': 6, '辣子鸡': 7, '香菇青菜': 8,
+                       '鱼香茄子': 9}
+    train_set = ImgDataset(root=args.dataset_path, type_='train', transforms=transform, class_label_dct=class_label_dct,
+                           num_per_class=200)
 
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True)
@@ -48,8 +57,7 @@ def load_dataset():
 def to_img(x):
     out = 0.5 * (x + 1)
     out = out.clamp(0, 1)
-    out = out.view(-1, 3, 32, 32)
-    # out = out.view(-1, 1, 28, 28)
+    out = out.view(-1, 3, args.input_size, args.input_size)
     return out
 
 
@@ -60,6 +68,56 @@ def weights_init(m):
     elif class_name.find('BatchNorm') != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
+
+
+class Generator32(nn.Module):
+    def __init__(self, nz, ngf, nc):
+        super(Generator32, self).__init__()
+        self.main = nn.Sequential(
+            # input is Z, going into a convolution
+            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 8),
+            nn.ReLU(True),
+            # state size. (ngf*8) x 4 x 4
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+            # state size. (ngf*4) x 8 x 8
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+            # state size. (ngf*2) x 16 x 16
+            nn.ConvTranspose2d(ngf * 2, nc, 4, 2, 1, bias=False),
+            nn.Tanh()
+            # state size. nc x 32 x 32
+        )
+
+    def forward(self, input):
+        return self.main(input)
+
+
+class Discriminator32(nn.Module):
+    def __init__(self, nc, ndf):
+        super(Discriminator32, self).__init__()
+        self.main = nn.Sequential(
+            # input is (nc) x 32 x 32
+            nn.Conv2d(nc, ndf * 2, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*2) x 16 x 16
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*4) x 8 x 8
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*8) x 4 x 4
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, input):
+        return self.main(input)
 
 
 class Generator(nn.Module):
@@ -120,49 +178,65 @@ class Discriminator(nn.Module):
         return self.main(input)
 
 
-class GeneratorCifar10(nn.Module):
+class Generator128(nn.Module):
     def __init__(self, nz, ngf, nc):
-        super(GeneratorCifar10, self).__init__()
+        super(Generator128, self).__init__()
         self.main = nn.Sequential(
             # input is Z, going into a convolution
-            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
+            nn.ConvTranspose2d(nz, ngf * 16, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 16),
+            nn.ReLU(True),
+            # state size. (ngf*4) x 4 x 4
+            nn.ConvTranspose2d(ngf * 16, ngf * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf * 8),
             nn.ReLU(True),
-            # state size. (ngf*8) x 4 x 4
+            # state size. (ngf*8) x 8 x 8
             nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf * 4),
             nn.ReLU(True),
-            # state size. (ngf*4) x 8 x 8
+            # state size. (ngf*4) x 16 x 16
             nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ngf * 2),
             nn.ReLU(True),
-            # state size. (ngf*2) x 16 x 16
-            nn.ConvTranspose2d(ngf * 2, nc, 4, 2, 1, bias=False),
+            # state size. (ngf*2) x 32 x 32
+            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            # state size. (ngf) x 64 x 64
+            nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
             nn.Tanh()
-            # state size. nc x 32 x 32
+            # state size. (nc) x 128 x 128
         )
 
     def forward(self, input):
         return self.main(input)
 
 
-class DiscriminatorCifar10(nn.Module):
+class Discriminator128(nn.Module):
     def __init__(self, nc, ndf):
-        super(DiscriminatorCifar10, self).__init__()
+        super(Discriminator128, self).__init__()
         self.main = nn.Sequential(
-            # input is (nc) x 32 x 32
-            nn.Conv2d(nc, ndf * 2, 4, 2, 1, bias=False),
+            # input is (nc) x 128 x 128
+            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*2) x 16 x 16
+            # state size. (ndf) x 64 x 64
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*2) x 32 x 32
             nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 4),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*4) x 8 x 8
+            # state size. (ndf*4) x 16 x 16
             nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
-            # state size. (ndf*8) x 4 x 4
-            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            # state size. (ndf*8) x 8 x 8
+            nn.Conv2d(ndf * 8, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*4) x 4 x 4
+            nn.Conv2d(ndf * 4, 1, 4, 1, 0, bias=False),
             nn.Sigmoid()
         )
 
@@ -181,8 +255,14 @@ if __name__ == "__main__":
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    generator = GeneratorCifar10(nz=100, ngf=64, nc=3).to(device)
-    discriminator = DiscriminatorCifar10(nc=3, ndf=64).to(device)  # mnist 28*28
+    # generator = Generator32(nz=100, ngf=64, nc=3).to(device)
+    # discriminator = Discriminator32(nc=3, ndf=64).to(device)
+
+    # generator = Generator(nz=100, ngf=64, nc=3).to(device)
+    # discriminator = Discriminator(nc=3, ndf=64).to(device)
+
+    generator = Generator128(nz=100, ngf=64, nc=3).to(device)
+    discriminator = Discriminator128(nc=3, ndf=64).to(device)
 
     # Apply the weights_init function to randomly initialize all weights to mean=0, stdev=0.2.
     generator.apply(weights_init)
@@ -232,7 +312,7 @@ if __name__ == "__main__":
             g_loss.backward()
             g_optimizer.step()
 
-            if (idx + 1) % 200 == 0:
+            if (idx + 1) % 10 == 0:
                 print('Epoch[{}/{}], D_loss:{:.6f}, G_loss:{:.6f}, D_real:{:.6f}, D_fake:{:.6f}'.format(
                     epoch, args.epochs, d_loss.data.item(), g_loss.data.item(),
                     real_out.data.mean(), fake_out.data.mean()))
